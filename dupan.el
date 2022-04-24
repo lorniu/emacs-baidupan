@@ -714,7 +714,6 @@
     (message "尝试打开 '%s'，请到浏览器中查看。" path)
     (browse-url (concat url path))))
 
-;;;###autoload
 (add-to-list 'file-name-handler-alist
              `(,(concat "\\`" dupan-prefix) . dupan-handler))
 
