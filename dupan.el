@@ -47,8 +47,6 @@
 
 (defvar dupan--config-file (locate-user-emacs-file ".pan-baidu-com"))
 
-(defvar-local dupan--local-files nil)
-
 (defvar dupan--urls
   `((auth        . "https://openapi.baidu.com/oauth/2.0/authorize")
     (token       . "https://openapi.baidu.com/oauth/2.0/token")
@@ -167,14 +165,6 @@
 (defun dupan-file-p (filename)
   (string-prefix-p dupan-prefix filename))
 
-(defun dupan--find-with-cache (filename)
-  (let ((cached (cl-find-if (lambda (f) (string= (alist-get 'path f) filename)) dupan--local-files)))
-    (unless cached
-      (let ((f (dupan-req 'finfo filename)))
-        (push f dupan--local-files)
-        (setq cached f)))
-    cached))
-
 (defun dupan-file-size (file)
   (file-attribute-size (file-attributes file)))
 
@@ -195,6 +185,32 @@
            until (>= (* i dupan-slice-size) fs)
            collect (cons (* i dupan-slice-size)
                          (min (* (+ i 1) dupan-slice-size) fs))))
+
+
+;;; Cache
+
+(defvar-local dupan--local-files nil "用于 Dired buffer 中缓存文件夹下所有文件的信息。")
+
+(defun dupan--find-with-cache (filename)
+  (let ((cached (cl-find-if (lambda (f) (string= (alist-get 'path f) filename)) dupan--local-files)))
+    (unless cached
+      (let ((f (dupan-req 'finfo filename)))
+        (push f dupan--local-files)
+        (setq cached f)))
+    cached))
+
+(defvar dupan--ttl-cache nil "全局缓存，可保持数据存活若干时间。主要用来缓解 31034 号错误太多的问题。")
+(defvar dupan--ttl-time 8 "默认存活 8 秒")
+
+(defmacro dupan-with-ttl-cache (key &rest body)
+  "优先取缓存。"
+  (declare (indent 1))
+  `(let* ((cache (cdr (assoc-string ,key dupan--ttl-cache))))
+     (if (and cache (< (time-to-seconds (time-since (cdr cache))) dupan--ttl-time))
+         (progn (dupan-info "命中缓存 (%s)..." ,key) (car cache))
+       (setq dupan--ttl-cache (assoc-delete-all ,key dupan--ttl-cache))
+       (prog1 (setq cache (progn ,@body))
+         (push (cons ,key (cons cache (current-time))) dupan--ttl-cache)))))
 
 
 ;;; Authorization
@@ -278,7 +294,10 @@
 (cl-defmethod dupan-req :around (func &rest args)
   (dupan-info "正请求 %s %s..." func args)
   (dupan-get-token)
-  (apply #'cl-call-next-method func args))
+  (cond ((eql func 'finfo)
+         (dupan-with-ttl-cache (md5 (format "finfo+%s" args))
+           (cl-call-next-method)))
+        (t (apply #'cl-call-next-method func args))))
 
 (cl-defmethod dupan-req ((_ (eql 'uinfo)))
   (dupan-make-request (dupan-make-url 'nas :method 'uinfo)))
