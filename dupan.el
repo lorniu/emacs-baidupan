@@ -5,7 +5,7 @@
 ;; Author: lorniu <lorniu@gmail.com>
 ;; URL: https://github.com/lorniu/emacs-baidupan
 ;; Package-Requires: ((emacs "27.1"))
-;; Keywords: applications
+;; Keywords: tools
 ;; SPDX-License-Identifier: MIT
 ;; Version: 1.0
 
@@ -49,13 +49,34 @@
 
 (defvar-local dupan--local-files nil)
 
-(defvar dupan--urls `((auth        . "https://openapi.baidu.com/oauth/2.0/authorize")
-                      (token       . "https://openapi.baidu.com/oauth/2.0/token")
-                      (quota       . "https://pan.baidu.com/api/quota")
-                      (nas         . "https://pan.baidu.com/rest/2.0/xpan/nas")
-                      (file        . "https://pan.baidu.com/rest/2.0/xpan/file")
-                      (multimedia  . "https://pan.baidu.com/rest/2.0/xpan/multimedia")
-                      (superfile   . "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2")))
+(defvar dupan--urls
+  `((auth        . "https://openapi.baidu.com/oauth/2.0/authorize")
+    (token       . "https://openapi.baidu.com/oauth/2.0/token")
+    (quota       . "https://pan.baidu.com/api/quota")
+    (nas         . "https://pan.baidu.com/rest/2.0/xpan/nas")
+    (file        . "https://pan.baidu.com/rest/2.0/xpan/file")
+    (multimedia  . "https://pan.baidu.com/rest/2.0/xpan/multimedia")
+    (superfile   . "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2")))
+
+(defvar dupan--errors
+  `((-6    . "身份验证失败")
+    (-7    . "文件或目录名错误或无权访问")
+    (-8    . "文件或目录已存在")
+    (-9    . "文件或目录不存在")
+    (-10   . "云端容量已满")
+    (-55   . "访问太频繁，已触发访问控制")
+    (2     . "参数错误")
+    (10    . "创建文件失败")
+    (111   . "Token 错误")
+    (31024 . "申请开通上传权限")
+    (31034 . "请求过于频繁，稍后再试")
+    (31190 . "文件不存在")
+    (31299 . "第一个分片的大小小于4MB")
+    (31326 . "命中防盗链，需检查 User-Agent 请求头是否正常")
+    (31362 . "签名错误，请检查链接地址是否完整")
+    (31363 . "分片缺失")
+    (31364 . "超出分片大小限制")
+    (42214 . "文件基础信息查询失败")))
 
 
 ;;; Utility
@@ -99,11 +120,10 @@
     (dupan-info "[%s]: %s, data: %s" url-request-method url url-request-data)
     (if callback ; async | sync
         (url-retrieve url (lambda (_status buf)
-                            (when callback
-                              (let ((r (funcall parse-resp)))
-                                (when (buffer-live-p buf)
-                                  (with-current-buffer buf
-                                    (funcall callback r))))))
+                            (let ((r (funcall parse-resp)))
+                              (when (buffer-live-p buf)
+                                (with-current-buffer buf
+                                  (funcall callback r)))))
                       (list (current-buffer)) t)
       (with-current-buffer (url-retrieve-synchronously url t)
         (funcall parse-resp)))))
@@ -112,27 +132,16 @@
   (let ((errno (alist-get 'errno json)))
     (if (or (null errno) (equal errno 0)) json
       (user-error
-       (pcase errno
-         (-6    "[-6] 身份验证失败")
-         (-7    "[-7] 文件或目录无权访问")
-         (-9    "[-9] 文件或目录不存在")
-         (-55   "[-55] 访问过繁，已致被限")
-         (2     "[2] 参数错误")
-         (111   "[111] Token 错误")
-         (31034 "[31034] 请求过于频繁，稍后再试")
-         (42214 "[42214] 文件基础信息查询失败")
-         (31326 "[31326] 命中防盗链，需检查 User-Agent 请求头是否正常")
-         (31362	"[31362] 签名错误，请检查链接地址是否完整")
-         (otherwise (let ((msg (alist-get 'errmsg json)))
-                      (format ">>> 错误编号: %s%s" errno (if msg (concat " (" msg ")") "")))))))))
+       (if-let ((errmsg (alist-get errno dupan--errors)))
+           (format "[%s] %s" errno errmsg)
+         (let ((msg (alist-get 'errmsg json)))
+           (concat (format "未知错误: %s" errno)
+                   (if msg (concat " (" msg ")") ""))))))))
 
-(defun dupan-make-multipart-body (file to)
-  "使用 `mm-url-encode-multipart-form-data' 生成的 form-data 总报 maybe request body not standard。莫名其妙，干脆自己拼得了。"
+(defun dupan-make-multipart-body (data to)
+  "使用 `mm-url-encode-multipart-form-data' 生成的 form-data 总报 maybe request body not standard 的错误。
+莫名其妙，干脆自己拼得了。"
   (let* ((boundary "--------------------------94c6bfb89dd7d006")
-         (data (with-temp-buffer
-                 (set-buffer-multibyte nil)
-                 (insert-file-contents-literally file)
-                 (buffer-string)))
          (body (concat "--" boundary "--\r\n"
                        "Content-Disposition: form-data; name=\"file\"; filename=\"" (url-file-nondirectory to) "\"\r\n"
                        "Content-Type: application/octet-stream\r\n\r\n"
@@ -169,11 +178,23 @@
 (defun dupan-file-size (file)
   (file-attribute-size (file-attributes file)))
 
-(defun dupan-file-md5sum (file)
-  "最简单的判断。可以借助外部的 md5sum 进行优化。"
+(defun dupan-file-md5sum (file &optional beg end)
+  "获取 FILE 的 md5 值。如果指定了 BEG 和 END，那么只求取这个区间内容的 MD5。
+可以借助外部的 md5sum 进行优化。"
   (with-temp-buffer
-    (insert-file-contents-literally file)
+    (insert-file-contents-literally file nil beg end)
     (md5 (current-buffer))))
+
+(defvar dupan-slice-size (* 4 1024 1024) "上传文件分片的尺寸。按要求 4M 大小。")
+
+(defun dupan-file-slice-points (filename)
+  "按照 `dupan-slice-size' 对文件进行分片处理，返回分片的点位。"
+  (cl-assert (file-regular-p filename))
+  (cl-loop with fs = (dupan-file-size filename)
+           for i from 0
+           until (>= (* i dupan-slice-size) fs)
+           collect (cons (* i dupan-slice-size)
+                         (min (* (+ i 1) dupan-slice-size) fs))))
 
 
 ;;; Authorization
@@ -338,58 +359,67 @@
     (dupan-make-request url :data data)))
 
 (defun dupan--upload-precreate (from to &optional overridep)
+  "进行预上传。"
   (unless (file-exists-p from)
     (user-error "没找到你要上传的文件 %s 啊" from))
-  (let ((size (dupan-file-size from)))
-    (when (> size (* 1024 1024 4))
-      (user-error "当前只允许上传小于 4M 的文件，更大的文件需要分片，暂没实现"))
-    (let* ((url (dupan-make-url 'file :method 'precreate))
-           (md5 (dupan-file-md5sum from))
-           ;; 这里的 rtype 参数压根没有用啊，莫名其妙，莫名其妙!
-           ;; 不知道是我遗漏了啥，还是文档的坑
-           ;; https://pan.baidu.com/union/doc/3ksg0s9r7
-           ;; 这样的话，不管怎么上传，只要遇到同名冲突，其策略都是重命名
-           (data `((path . ,(url-encode-url to))
-                   (rtype . ,(if overridep 3 0))
-                   (size . ,size)
-                   (isdir . 0)
-                   (autoinit . 1)
-                   (block_list . ,(json-encode (list md5)))
-                   (content-md5 . ,md5)))
-           (rs (dupan-make-request url :data data)))
-      (list (alist-get 'uploadid rs) (alist-get 'return_type rs) md5 size))))
+  (let* ((size (dupan-file-size from))
+         (url (dupan-make-url 'file :method 'precreate))
+         (md5 (dupan-file-md5sum from))
+         ;; 分片，计算
+         (slice-points (dupan-file-slice-points from))
+         ;; 分片，MD5
+         (block-list (cl-loop for (beg . end) in slice-points
+                              collect (dupan-file-md5sum from beg end)))
+         ;; 发送预上传请求
+         (data `((path . ,(url-encode-url to))
+                 (rtype . ,(if overridep 3 0))
+                 (size . ,size)
+                 (isdir . 0)
+                 (autoinit . 1)
+                 (block_list . ,(json-encode block-list))
+                 (content-md5 . ,md5)))
+         (rs (dupan-make-request url :data data)))
+    (list :uploadid (alist-get 'uploadid rs)
+          :return-type (alist-get 'return_type rs)
+          :slice-points slice-points
+          :block-list block-list
+          :md5 md5 :size size)))
 
-(defun dupan--upload-contents (from to uploadid)
-  (let* ((url (dupan-make-url 'superfile
-                :method 'upload
-                :type 'tmpfile
-                :path (url-encode-url to)
-                :uploadid uploadid
-                :partseq 0))
-         (data (dupan-make-multipart-body from to))
-         (headers `(("Content-Type" . ,(concat "multipart/form-data; boundary=" (cdr data))))))
-    (dupan-make-request url :data (car data) :headers headers)))
+(defun dupan--upload-contents (from to meta)
+  "META 是预上传阶段返回的结果，包括 uploadid 和分片结果等。"
+  (cl-loop with uploadid = (plist-get meta :uploadid)
+           for i from 0
+           for p in (plist-get meta :slice-points)
+           for url = (dupan-make-url 'superfile
+                       :method 'upload
+                       :type 'tmpfile
+                       :path (url-encode-url to)
+                       :uploadid uploadid
+                       :partseq i)
+           for raw = (with-temp-buffer
+                       (set-buffer-multibyte nil)
+                       (insert-file-contents-literally from nil (car p) (cdr p))
+                       (buffer-string))
+           for data = (dupan-make-multipart-body raw to)
+           for headers = `(("Content-Type" . ,(concat "multipart/form-data; boundary=" (cdr data))))
+           collect (progn (dupan-info "上传文件 %s 的第 %s 个分片.." from (+ i 1))
+                          (dupan-make-request url :data (car data) :headers headers))))
 
 (cl-defmethod dupan-req ((_ (eql 'upload)) from to &optional overridep)
+  ;; 预上传
   (let ((meta (dupan--upload-precreate from to overridep)))
-    (unless (equal (nth 1 meta) 2) ; 如果是 2 说明已经上传完毕
-      (dupan--upload-contents from to (car meta))
-      (let* ((url (dupan-make-url 'file :method 'create))
-             (data `((path . ,to)
-                     (uploadid . ,(nth 0 meta))
-                     (block_list . ,(json-encode (list (nth 2 meta))))
-                     (size . ,(nth 3 meta))
-                     (rtype . 1)
+    (unless (equal (plist-get meta :return-type) 2) ; 如果是 2 说明已经上传完毕，将没必要继续了
+      ;; 分片上传
+      (dupan--upload-contents from to meta)
+      ;; 完成上传
+      (let* ((data `((path . ,to)
+                     (uploadid . ,(plist-get meta :uploadid))
+                     (block_list . ,(json-encode (plist-get meta :block-list)))
+                     (size . ,(plist-get meta :size))
+                     (rtype . ,(if overridep 3 0))
                      (isdir . 0)))
-             (rs (dupan-make-request url :data data))
-             (nn (alist-get 'path rs)))
-        ;; 基于目前预上传阶段，rtype 无效，遇到重名文件默认策略是重命名，所以做以下处理
-        (when (and overridep (not (string= nn to)))
-          (dupan-req 'delete to)
-          (sleep-for 0.5)
-          (dupan-req 'move nn to)
-          (setf (alist-get 'path rs) to))
-        rs))))
+             (url (dupan-make-url 'file :method 'create)))
+        (dupan-make-request url :data data)))))
 
 (cl-defmethod dupan-req ((_ (eql 'download)) dlink to)
   (let ((url (dupan-make-url dlink)))
@@ -408,7 +438,7 @@
 ;; (dupan-req 'search "三国演义.zip")
 ;; (dupan-req 'delete "/apps/vvv")
 ;; (dupan-req 'copy "/xxx/aaa" "/yyy/bbb")
-;; (dupan-req 'upload "~/.bashrc" "/apps2/vvv/xxx.js" t)
+;; (dupan-req 'upload "~/.bashrc" "/apps/vvv/xxx.js" t)
 ;; (dupan-req 'mkdir "/vvv")
 ;; (dupan-req 'delete "/vvv")
 ;; (dupan-req 'download "" "~/vvv/ddd.lisp")
@@ -436,8 +466,8 @@
 (defun dupan-handle:file-exists-p (filename)
   (setq filename (dupan-normalize filename))
   ;; 有些插件对这种 tramp 方式的文件访问支持不够好，为避免问题，暂时硬核打补丁
-  (cond ((or (string= "/tags" filename) ; citre
-             (string-match-p "/\\.?!?\\.tags$" filename)) nil)
+  (cond ((string-match-p "~/" filename) nil)
+        ((string-match-p "[/.]tags$" filename) nil) ; citre
         ((string-match-p "/\\." filename) t)
         (t (dupan--find-with-cache filename))))
 
@@ -447,10 +477,11 @@
         (t t)))
 
 (defun dupan-handle:file-directory-p (filename)
-  (setq filename (dupan-normalize filename))
-  (and (not (string-match-p "/\\." filename))
-       (let ((f (dupan--find-with-cache filename)))
-         (equal (alist-get 'isdir f) 1))))
+  (when (file-exists-p filename)
+    (setq filename (dupan-normalize filename))
+    (and (not (string-match-p "/\\." filename))
+         (let ((f (dupan--find-with-cache filename)))
+           (equal (alist-get 'isdir f) 1)))))
 
 (defun dupan-handle:file-executable-p (filename)
   (file-directory-p filename))
@@ -684,7 +715,7 @@
   "搜索网盘文件并打开。如果带命令前缀 (即 C-u) 那么将提示搜索的目录。"
   (interactive "P")
   (let ((input (read-string "搜索关键字: ")))
-    (when (< (length (string-replace " " "" input)) 1)
+    (when (< (length (replace-regexp-in-string " " "" input)) 1)
       (user-error "是不是输入的内容太少了？"))
     (let* ((dir (when choose-dir
                   (let* ((def (if (dupan-file-p default-directory) (dupan-normalize default-directory)))
