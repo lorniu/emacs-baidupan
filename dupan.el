@@ -532,7 +532,7 @@
   (dupan-info "[handler] file-attributes: %s" filename)
   (setq filename (dupan-normalize filename))
   (let* ((finfo (dupan--find-with-cache filename))
-         (date (date-to-time (or (alist-get 'client_mtime finfo) "Mon, 01 Jan 0000 00:00:00 +0000")))
+         (date (if-let ((time (alist-get 'server_mtime finfo))) (time-convert time) (date-to-time "Mon, 01 Jan 0000 00:00:00 +0000")))
          (folder (equal (alist-get 'isdir finfo) 1))
          (size (or (alist-get 'size finfo) 0))
          (perm (concat (if folder "d" "-") "rwxr-xr--")))
@@ -546,10 +546,10 @@
 
   (if (not full-directory-p)
       (let* ((attrs (file-attributes filename))
-             (a (format "  %s %2d %8s %8s %8s %s "
+             (a (format "  %s %2d %2s %2s %8s %s "
                         (elt attrs 8) (elt attrs 1) (elt attrs 2) (elt attrs 3)
                         (file-size-human-readable (elt attrs 7))
-                        (format-time-string "%X" (elt attrs 4))))
+                        (format-time-string "%Y-%m-%d %H:%M" (elt attrs 4))))
              (s (with-temp-buffer
                   (insert (file-name-nondirectory (directory-file-name filename)) "\n")
                   (put-text-property (point-min) (- (point-max) 1) 'dired-filename t)
@@ -565,7 +565,10 @@
            (total (alist-get 'total quota)))
       (with-silent-modifications
         (goto-char (point-max))
-        (insert (format "  baidu, used %d, available %d (%.0f%% total used)\n" used (- total used) (/ (* used 100.0) total)))))
+        (insert (format "  baidu: total %s, avaiable %s (%.0f%% used)\n"
+                        (file-size-human-readable total)
+                        (file-size-human-readable (- total used))
+                        (/ (* used 100.0) total)))))
     (dupan-req 'list (dupan-normalize filename)
       (lambda (res)
         ;; files
