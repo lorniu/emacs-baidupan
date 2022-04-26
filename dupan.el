@@ -115,7 +115,8 @@
                                      (dupan-info "RESPONSE: %s" res)
                                      (dupan-ensure-results res))))
                         (kill-buffer)))))
-    (dupan-info "[%s]: %s, data: %s" url-request-method url url-request-data)
+    (dupan-info "[%s]: %s, data: %s" url-request-method url
+                (if (string-match-p "method=upload" url) "[octet form-data]" url-request-data))
     (if callback ; async | sync
         (url-retrieve url (lambda (_status buf)
                             (let ((r (funcall parse-resp)))
@@ -141,7 +142,7 @@
 莫名其妙，干脆自己拼得了。"
   (let* ((boundary "--------------------------94c6bfb89dd7d006")
          (body (concat "--" boundary "--\r\n"
-                       "Content-Disposition: form-data; name=\"file\"; filename=\"" (url-file-nondirectory to) "\"\r\n"
+                       "Content-Disposition: form-data; name=\"file\"; filename=\"" (url-encode-url (url-file-nondirectory to)) "\"\r\n"
                        "Content-Type: application/octet-stream\r\n\r\n"
                        data "\r\n"
                        "--" boundary "--")))
@@ -176,6 +177,7 @@
   "获取 FILE 的 md5 值。如果指定了 BEG 和 END，那么只求取这个区间内容的 MD5。
 可以借助外部的 md5sum 进行优化。"
   (with-temp-buffer
+    (set-buffer-multibyte nil)
     (insert-file-contents-literally file nil beg end)
     (md5 (current-buffer))))
 
@@ -312,7 +314,7 @@
 (cl-defmethod dupan-req ((_ (eql 'list)) dir &optional callback)
   "当带回调函数的时候，使用异步的方式进行请求，否则同步。"
   (let* ((url (dupan-make-url 'file
-                :method 'list :dir (or dir "/")
+                :method 'list :dir (url-hexify-string (or dir "/"))
                 :start 0 :limit 1000 :web 0 :folder 0)))
     (if callback
         (dupan-make-request url :callback
@@ -323,7 +325,7 @@
 
 (cl-defmethod dupan-req ((_ (eql 'search)) text &optional dir norecur)
   (let* ((url (dupan-make-url 'file
-                :method 'search :key text :dir (or dir "/")
+                :method 'search :key (url-hexify-string text) :dir (url-hexify-string (or dir "/"))
                 :web 0 :recursion (if norecur 0 1) :num 500))
          (res (dupan-make-request url)))
     (cl-coerce (alist-get 'list res) 'list)))
@@ -342,7 +344,7 @@
       '((isdir . 1))
     (let* ((dir (file-name-directory path))
            (name (file-name-nondirectory path))
-           (rs (dupan-req 'search name dir t))
+           (rs (dupan-req 'search (substring name nil (min (length name) 18)) dir t))
            (file (cl-find-if (lambda (f) (string= (alist-get 'path f) path)) rs)))
       (when (and dlink? file (equal (alist-get 'isdir file) 0))
         (when-let ((meta (dupan-req 'meta (alist-get 'fs_id file))))
@@ -359,6 +361,7 @@
   (let* ((files (json-encode `(((path . ,(url-hexify-string file))))))
          (url (dupan-make-url 'file :method 'filemanager :opera 'delete))
          (data `((filelist . ,files) (ondup . fail))))
+    ;; 即使删除失败，也不会有错误码。闹那般啊！
     (alist-get 'info (dupan-make-request url :data data))))
 
 (cl-defmethod dupan-req ((_ (eql 'copy)) from to)
@@ -366,7 +369,7 @@
          (newname (file-name-nondirectory to))
          (files (json-encode `(((path . ,(url-hexify-string from))
                                 (dest . ,(url-hexify-string dest))
-                                (newname . ,(url-hexify-string to))))))
+                                (newname . ,(url-hexify-string newname))))))
          (url (dupan-make-url 'file :method 'filemanager :opera 'copy))
          (data `((async . 2) (filelist . ,files))))
     (dupan-make-request url :data data)))
@@ -394,7 +397,7 @@
          (block-list (cl-loop for (beg . end) in slice-points
                               collect (dupan-file-md5sum from beg end)))
          ;; 发送预上传请求
-         (data `((path . ,(url-encode-url to))
+         (data `((path . ,(url-hexify-string to))
                  (rtype . ,(if overridep 3 0))
                  (size . ,size)
                  (isdir . 0)
@@ -411,12 +414,13 @@
 (defun dupan--upload-contents (from to meta)
   "META 是预上传阶段返回的结果，包括 uploadid 和分片结果等。"
   (cl-loop with uploadid = (plist-get meta :uploadid)
+           with ps = (plist-get meta :slice-points)
            for i from 0
-           for p in (plist-get meta :slice-points)
+           for p in ps
            for url = (dupan-make-url 'superfile
                        :method 'upload
                        :type 'tmpfile
-                       :path (url-encode-url to)
+                       :path (url-hexify-string to)
                        :uploadid uploadid
                        :partseq i)
            for raw = (with-temp-buffer
@@ -425,7 +429,7 @@
                        (buffer-string))
            for data = (dupan-make-multipart-body raw to)
            for headers = `(("Content-Type" . ,(concat "multipart/form-data; boundary=" (cdr data))))
-           collect (progn (dupan-info "上传文件 %s 的第 %s 个分片.." from (+ i 1))
+           collect (progn (message "上传文件 '%s' 第 %s/%s 个分片..." from (+ i 1) (length ps))
                           (dupan-make-request url :data (car data) :headers headers))))
 
 (cl-defmethod dupan-req ((_ (eql 'upload)) from to &optional overridep)
@@ -435,7 +439,7 @@
       ;; 分片上传
       (dupan--upload-contents from to meta)
       ;; 完成上传
-      (let* ((data `((path . ,to)
+      (let* ((data `((path . ,(url-hexify-string to))
                      (uploadid . ,(plist-get meta :uploadid))
                      (block_list . ,(json-encode (plist-get meta :block-list)))
                      (size . ,(plist-get meta :size))
@@ -450,7 +454,9 @@
 
 (cl-defmethod dupan-req ((_ (eql 'streaming)) path &optional ad-token)
   "用来获取视频播放 M3U8 文件。TODO: 需要完善。"
-  (let* ((url (dupan-make-url 'file :path (url-hexify-string pth) :type "M3U8_AUTO_1080" :addToken ad-token))
+  (let* ((url (dupan-make-url 'file
+                :method 'streaming :path (url-hexify-string path)
+                :type "M3U8_AUTO_1080" :addToken ad-token))
          (headers `(("Content-Type" . "xpanvideo;$appName;$appVersion;$sysName;$sysVersion;ts"))))
     (dupan-make-request url :headers headers)))
 
@@ -546,7 +552,7 @@
   (setq directory (dupan-normalize directory))
   (dupan-handle:delete-file directory))
 
-(defun dupan-handle:copy-file (file newname &optional _ok-if-already-exists _keep-time _preserve-uid-gid _preserve-selinux-context)
+(defun dupan-handle:copy-file (file newname &optional ok-if-already-exists _keep-time _preserve-uid-gid _preserve-selinux-context)
   (cond
    ((and (dupan-file-p file) (dupan-file-p newname))
     (dupan-req 'copy
@@ -556,7 +562,7 @@
    ((and (dupan-file-p file) (not (dupan-file-p newname)))
     (rename-file (file-local-copy file) newname))
    ((and (not (dupan-file-p file)) (dupan-file-p newname))
-    (dupan-req 'upload file (dupan-normalize newname)))))
+    (dupan-req 'upload file (dupan-normalize newname) ok-if-already-exists))))
 
 (defun dupan-handle:copy-directory (directory newname &optional keep-time parents copy-contents)
   (cond
@@ -752,7 +758,7 @@
            (desc (if dir (concat " in '" dir "'") ""))
            (prompt (format "网盘文件%s (关键词 %s): " desc input)))
       (message "搜索%s..." desc)
-      (let* ((files (dupan-req 'search input dir))
+      (let* ((files (dupan-req 'search input (dupan-normalize dir)))
              (candicates (cl-loop
                           for file in files
                           when (equal (alist-get 'isdir file) 0)
@@ -770,10 +776,10 @@
   (interactive)
   (let* ((url "https://pan.baidu.com/disk/main#/index?category=all&path=")
          (dir (or dir (if (dupan-file-p default-directory) (dupan-normalize default-directory))))
-         (path (read-string "在浏览器中打开目录: " (concat dir (url-hexify-string dir)))))
+         (path (read-string "在浏览器中打开目录: " (concat dir (url-encode-url dir)))))
     (unless (string-prefix-p "/" path) (setq path (concat "/" path)))
-    (message "尝试打开 '%s'，请到浏览器中查看。" path)
-    (browse-url (concat url path))))
+    (message "已在浏览器中打开 '%s'，请前往查看。" path)
+    (browse-url (concat url (url-hexify-string path)))))
 
 (add-to-list 'file-name-handler-alist
              `(,(concat "\\`" dupan-prefix) . dupan-handler))
