@@ -151,6 +151,10 @@
   (when dupan-debug
     (apply 'message (concat "\t[百度网盘] " fmt-string) args)))
 
+(defmacro dupan-with-suppress-message (&rest body)
+  `(let ((message-log-max nil))
+     (with-temp-message "" ,@body)))
+
 (defun dupan-normalize (path &optional force-prefix-p)
   (when (and path (string-match-p (concat "^" dupan-prefix) path))
     (setq path (substring path (length dupan-prefix))))
@@ -441,8 +445,8 @@
         (dupan-make-request url :data data)))))
 
 (cl-defmethod dupan-req ((_ (eql 'download)) dlink to)
-  (let ((url (dupan-make-url dlink)))
-    (url-copy-file url to)))
+  (dupan-with-suppress-message
+   (url-copy-file (dupan-make-url dlink) to)))
 
 (cl-defmethod dupan-req ((_ (eql 'streaming)) path &optional ad-token)
   "用来获取视频播放 M3U8 文件。TODO: 需要完善。"
@@ -642,19 +646,22 @@
 
 (defun dupan-handle:insert-file-contents (filename &optional visit _beg _end replace)
   (dupan-info "[handler] insert-file-contents: %s" filename)
-  (barf-if-buffer-read-only)
-  (if (file-exists-p filename)
-      (save-excursion
-        (if replace (erase-buffer))
-        (let ((nf (file-local-copy filename)))
+  (condition-case err
+      (if (not (file-exists-p filename))
+          (user-error "貌似文件 %s 不存在" filename)
+        (let ((count 0)
+              (nf (file-local-copy filename)))
+          (if replace (erase-buffer))
           (unwind-protect
-              (with-silent-modifications
-                (insert-file-contents nf))
-            (delete-file nf))))
-    (set-buffer-modified-p nil))
-  (when visit
-    (setf buffer-file-name filename)
-    (setf buffer-read-only (not (file-writable-p filename)))))
+              (save-excursion
+                (setq count (cdr (insert-file-contents nf nil nil nil t)))
+                (when visit
+                  (setf buffer-file-name filename)
+                  (setf buffer-read-only (not (file-writable-p filename)))
+                  (set-visited-file-modtime (file-attribute-modification-time (file-attributes nf)))))
+            (delete-file nf))
+          (cons filename count)))
+    (error (kill-buffer) (signal 'user-error (cdr err)))))
 
 (defun dupan-handle:write-region (beg end filename &optional append visit _lockname _mustbenew)
   (dupan-info "[handler] write-region: %s, %s, %s" filename beg end)
@@ -725,6 +732,7 @@
 (defun dupan-handle:set-file-modes (&rest _) nil)
 (defun dupan-handle:set-file-times (&rest _) nil)
 (defun dupan-handle:set-visited-file-modtime (&rest _) nil)
+(defun dupan-handle:verify-visited-file-modtime (&optional _buf) t)
 (defun dupan-handle:file-selinux-context (&rest _) nil)
 
 
