@@ -429,7 +429,8 @@
                        (buffer-string))
            for data = (dupan-make-multipart-body raw to)
            for headers = `(("Content-Type" . ,(concat "multipart/form-data; boundary=" (cdr data))))
-           collect (progn (message "上传文件 '%s' 第 %s/%s 个分片..." from (+ i 1) (length ps))
+           collect (progn (when (> (length ps) 1)
+                            (message "正在上传第 %s/%s 个分片..." (+ i 1) (length ps)))
                           (dupan-make-request url :data (car data) :headers headers))))
 
 (cl-defmethod dupan-req ((_ (eql 'upload)) from to &optional overridep)
@@ -653,20 +654,19 @@
 (defun dupan-handle:insert-file-contents (filename &optional visit _beg _end replace)
   (dupan-info "[handler] insert-file-contents: %s" filename)
   (condition-case err
-      (if (not (file-exists-p filename))
-          (user-error "貌似文件 %s 不存在" filename)
-        (let ((count 0)
-              (nf (file-local-copy filename)))
-          (if replace (erase-buffer))
-          (unwind-protect
-              (save-excursion
-                (setq count (cdr (insert-file-contents nf nil nil nil t)))
-                (when visit
-                  (setf buffer-file-name filename)
-                  (setf buffer-read-only (not (file-writable-p filename)))
-                  (set-visited-file-modtime (file-attribute-modification-time (file-attributes nf)))))
-            (delete-file nf))
-          (cons filename count)))
+      (let ((count 0))
+        (when (file-exists-p filename)
+          (let ((nf (file-local-copy filename)))
+            (unwind-protect
+                (save-excursion
+                  (if replace (erase-buffer))
+                  (setq count (cdr (insert-file-contents nf nil nil nil t))))
+              (delete-file nf))))
+        (when visit
+          (setf buffer-file-name filename)
+          (setf buffer-read-only (not (file-writable-p filename)))
+          (set-visited-file-modtime (current-time)))
+        (cons filename count))
     (error (kill-buffer) (signal 'user-error (cdr err)))))
 
 (defun dupan-handle:write-region (beg end filename &optional append visit _lockname _mustbenew)
