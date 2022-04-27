@@ -776,7 +776,7 @@
   (interactive)
   (let* ((url "https://pan.baidu.com/disk/main#/index?category=all&path=")
          (dir (or dir (if (dupan-file-p default-directory) (dupan-normalize default-directory))))
-         (path (read-string "在浏览器中打开目录: " (concat dir (url-encode-url dir)))))
+         (path (read-string "在浏览器中打开目录: " dir)))
     (unless (string-prefix-p "/" path) (setq path (concat "/" path)))
     (message "已在浏览器中打开 '%s'，请前往查看。" path)
     (browse-url (concat url (url-hexify-string path)))))
