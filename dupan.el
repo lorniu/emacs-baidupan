@@ -371,7 +371,7 @@
                                 (dest . ,(url-hexify-string dest))
                                 (newname . ,(url-hexify-string newname))))))
          (url (dupan-make-url 'file :method 'filemanager :opera 'copy))
-         (data `((async . 2) (filelist . ,files))))
+         (data `((async . 0) (filelist . ,files))))
     (dupan-make-request url :data data)))
 
 (cl-defmethod dupan-req ((_ (eql 'move)) from to)
@@ -381,7 +381,7 @@
                                 (dest . ,(url-hexify-string dest))
                                 (newname . ,(url-hexify-string newname))))))
          (url (dupan-make-url 'file :method 'filemanager :opera 'move))
-         (data `((async . 2) (filelist . ,files))))
+         (data `((async . 0) (filelist . ,files))))
     (dupan-make-request url :data data)))
 
 (defun dupan--upload-precreate (from to &optional overridep)
