@@ -19,7 +19,7 @@
 ;; 基本使用步骤:
 ;;
 ;;  1. 下载本文件，并加载之 (load or require)
-;;  2. 确保拥有百度帐号后，执行 `M-x dupan-gen-config` 命令生成记录身份信息的配置文件
+;;  2. 确保拥有百度帐号后，执行 `M-x dupan-add-account` 命令生成记录身份信息的配置文件
 ;;  3. 之后，使用 `M-x dupan-find` 搜索网盘文件并打开。
 ;;     亦或使用 `C-x C-f /dp:/网盘文件路径` 直接打开指定文件。
 ;;
@@ -222,12 +222,18 @@
 ;;; Authorization
 
 ;;;###autoload
-(defun dupan-gen-config ()
+(defun dupan-add-account ()
   "用来生成包含身份验证信息的配置文件。"
   (interactive)
-  (when (file-exists-p dupan--config-file)
-    (user-error "文件 %s 已存在，请删除它后重新再试"))
-  (let* ((help "
+  (if (and (file-exists-p dupan--config-file)
+           (not (y-or-n-p (format "配置文件 %s 已存在，并存在帐号 %s，继续将添加新的帐号。是否继续？"
+                                  dupan--config-file
+                                  (progn
+                                    (dupan-load-config)
+                                    (mapconcat (lambda (acc) (alist-get 'name acc)) dupan--config "、"))))))
+      (user-error "操作已取消")
+    (let ((newp (null dupan--config))
+          (help "
 要生成配置文件，需要你提供一些信息。如果你是第一次使用百度开放平台，按下面步骤操作：\n
 1、请先在网页中打开 https://pan.baidu.com/union/apply 页面，登录帐号，并申请接入（个人）
 2、填写信息，完成身份认证的审核
@@ -236,35 +242,67 @@
 4、进入安全设置，将回调页设置为一个有效 URL，比如 https://pan.baidu.com/union/console
 
 详情阅读百度开放平台的相关文档。你是否已经搞掂且要继续？"))
-    (when (y-or-n-p help)
-      (let ((id       (read-string "请输入您的 [AppKey]: "))
-            (secret   (read-string "请输入您的 [SecretKey]: "))
-            (redirect (read-string "请输入您的 [回调页面]: ")))
-        (when (y-or-n-p (format "您输入的信息为:\n\n AppKey:\t%s\n SecretKey:\t%s\n 回调页面:\t%s\n\n是否确认？" id secret redirect))
-          (let ((url (dupan-make-url 'auth :response_type "code" :scope "basic,netdisk" :client_id id :redirect_uri redirect)))
-            (browse-url url)
-            (let* ((code (read-string "接下来到浏览器中在弹出的页面中进行授权，将返回页面 url 中的 code 填到此处: "))
-                   (tokens (dupan-get-refresh-token code id secret redirect)))
-              (setq dupan--config `((id       . ,id)
-                                    (secret   . ,secret)
-                                    (redirect . ,redirect)
-                                    (refresh-token . ,(alist-get 'refresh_token tokens))
-                                    (access-token  . ,(alist-get 'access_token tokens))
-                                    (expires-in   .  ,(time-add (current-time) (seconds-to-time (- (alist-get 'expires_in tokens) 120))))))
-              (with-temp-file dupan--config-file
-                (prin1 dupan--config (current-buffer)))
-              (message "配置文件 %s 生成成功!" dupan--config-file))))))))
+      (when (y-or-n-p help)
+        (let ((id (read-string "请输入您的 [AppKey]: ")))
+          (when-let ((acc (cl-find-if (lambda (a) (string= (alist-get 'id a) id)) dupan--config)))
+            (user-error "要添加的帐号已存在，请确认是否搞错！ %s : %s" (alist-get 'name acc) id))
+          (let ((secret   (read-string "请输入您的 [SecretKey]: "))
+                (redirect (read-string "请输入您的 [回调页面]: ")))
+            (when (y-or-n-p (format "您输入的信息为:\n\n AppKey:\t%s\n SecretKey:\t%s\n 回调页面:\t%s\n\n是否确认？" id secret redirect))
+              (let ((url (dupan-make-url 'auth :response_type "code" :scope "basic,netdisk" :client_id id :redirect_uri redirect)))
+                (browse-url url)
+                (let* ((code (read-string "接下来到浏览器中在弹出的页面中进行授权，将返回页面 url 中的 code 填到此处: "))
+                       (tokens (dupan-get-refresh-token code id secret redirect))
+                       (account `((id       . ,id)
+                                  (secret   . ,secret)
+                                  (redirect . ,redirect)
+                                  (refresh-token . ,(alist-get 'refresh_token tokens))
+                                  (access-token  . ,(alist-get 'access_token tokens))
+                                  (expires-in   .  ,(time-add (current-time) (seconds-to-time (- (alist-get 'expires_in tokens) 120))))))
+                       (name (let ((dupan--config (list account)))
+                               (alist-get 'baidu_name (dupan-req 'uinfo)))))
+                  (setf (alist-get 'name account) name)
+                  (setq dupan--config (append dupan--config (list account)))
+                  (with-temp-file dupan--config-file
+                    (pp dupan--config (current-buffer)))
+                  (if newp
+                      (message "配置文件 %s 生成成功!" dupan--config-file)
+                    (message "帐号 %s 添加成功。可以使用 'dupan-switch-account' 切换帐号。" name)))))))))))
+
+;;;###autoload
+(defun dupan-switch-account ()
+  "用来切换到其他帐号。只在添加了多个帐号的情况下有用。"
+  (interactive)
+  (unless (dupan-load-config)
+    (user-error "没发现任何的帐号信息，请确认配置文件已经加载"))
+  (let ((cs (mapcar (lambda (acc) (alist-get 'name acc))
+                    (cdr dupan--config))))
+    (unless cs (user-error "当前只添加了一个帐号，没必要切换。"))
+    (let* ((name (completing-read "选择要切换的帐号: " cs nil t))
+           (newcf (cl-loop for acc in dupan--config
+                           if (string-equal name (alist-get 'name acc)) collect acc into first
+                           else collect acc into others
+                           finally return (append first others))))
+      (with-temp-file dupan--config-file
+        (pp newcf (current-buffer)))
+      (dupan-load-config))))
 
 (defun dupan-load-config ()
   (if (file-exists-p dupan--config-file)
-      (setq dupan--config (with-temp-buffer
-                            (insert-file-contents dupan--config-file)
-                            (read (current-buffer))))
-    (user-error "没找到配置文件 '%s', 请先调用 'M-x dupan-gen-config' 生成一个" dupan--config-file)))
+      (let (accs)
+        (ignore-errors
+          (let ((rs (with-temp-buffer
+                      (insert-file-contents dupan--config-file)
+                      (read (current-buffer)))))
+            (setq accs (if (consp (caar rs)) rs (list rs)))))
+        (unless (alist-get 'refresh-token (car accs))
+          (user-error "配置文件 %s 存在错误。" dupan--config-file))
+        (setq dupan--config accs))
+    (user-error "没找到配置文件 '%s', 请先调用 'M-x dupan-add-account' 生成一个" dupan--config-file)))
 
 (defun dupan-get-config (&optional force)
   (or (unless force dupan--config)
-      (setq dupan--coqnfig (dupan-load-config))))
+      (setq dupan--config (dupan-load-config))))
 
 (defun dupan-get-refresh-token (code id secret redirect)
   (let ((url (dupan-make-url 'token
@@ -272,7 +310,7 @@
     (dupan-make-request url)))
 
 (defun dupan-get-token ()
-  (let* ((config (dupan-get-config t))
+  (let* ((config (car (dupan-get-config)))
          (expired (alist-get 'expires-in config))
          (token (alist-get 'access-token config))
          (avail (and token expired (time-less-p (current-time) expired))))
@@ -626,9 +664,9 @@
            (total (alist-get 'total quota)))
       (with-silent-modifications
         (goto-char (point-max))
-        (insert (format "  baidu: total %s, avaiable %s (%.0f%% used)\n"
+        (insert (format "  baidu: %s/%s (%.2f%% used)\n"
+                        (file-size-human-readable used)
                         (file-size-human-readable total)
-                        (file-size-human-readable (- total used))
                         (/ (* used 100.0) total)))))
     (dupan-req 'list (dupan-normalize filename)
       (lambda (res)
