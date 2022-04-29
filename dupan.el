@@ -76,6 +76,8 @@
     (31364 . "超出分片大小限制")
     (42214 . "文件基础信息查询失败")))
 
+(defvar dupan-sleep-ticks 0.3 "为了避免过多的 '请求过于频繁'，所以休息一下再继续。。。")
+
 
 ;;; Utility
 
@@ -435,8 +437,9 @@
          ;; 分片，计算
          (slice-points (dupan-file-slice-points from))
          ;; 分片，MD5
-         (block-list (cl-loop for (beg . end) in slice-points
-                              collect (dupan-file-md5sum from beg end)))
+         (block-list (or (cl-loop for (beg . end) in slice-points
+                                  collect (dupan-file-md5sum from beg end))
+                         (list md5)))
          ;; 发送预上传请求
          (data `((path . ,(url-hexify-string to))
                  (rtype . ,(if overridep 3 0))
@@ -582,13 +585,12 @@
 
 (defun dupan-handle:make-directory (dir &optional _parents)
   (setq dir (dupan-normalize dir))
-  (dupan-req 'mkdir dir)
-  (message "创建成功!"))
+  (dupan-req 'mkdir dir))
 
 (defun dupan-handle:delete-file (filename &optional _trash)
   (setq filename (dupan-normalize filename))
   (dupan-req 'delete filename)
-  (message "删除成功!"))
+  (sleep-for dupan-sleep-ticks))
 
 (defun dupan-handle:delete-directory (directory &optional _recursive _trash)
   (setq directory (dupan-normalize directory))
@@ -613,7 +615,30 @@
                  (file-name-directory (directory-file-name newname))
                  parents))
     (copy-file directory newname nil keep-time parents copy-contents))
-   (t (error "本地和远程间的文件夹复制，不支持"))))
+   ((and (not (dupan-file-p directory)) (dupan-file-p newname))
+    (if (file-exists-p newname)
+        (user-error "文件夹已存在，无法上传（暂不支持增量上传）。")
+      (make-directory newname t)
+      (dolist (file (directory-files directory 'full directory-files-no-dot-files-regexp))
+        (let ((target (concat (file-name-as-directory newname) (file-name-nondirectory file)))
+	          (filetype (car (file-attributes file))))
+	      (if (eq filetype t)
+	          (copy-directory file target keep-time parents t)
+            (message "上传文件 %s..." file)
+	        (copy-file file target t keep-time))
+          (sleep-for dupan-sleep-ticks)))))
+   ((and (dupan-file-p directory) (not (dupan-file-p newname)))
+    (if (file-exists-p newname)
+        (user-error "文件夹已存在，不能继续下载（暂不支持增量下载）。")
+      (make-directory newname t)
+      (cl-loop with list = (dupan-req 'list (dupan-normalize directory))
+               for file in (mapcar (lambda (f) (dupan-normalize (alist-get 'path f) t)) list)
+               for target = (expand-file-name (file-name-nondirectory file) newname)
+               do (progn (if (eq (car (file-attributes file)) t)
+                             (copy-directory file target keep-time parents t)
+                           (message "下载文件 %s..." file)
+	                       (copy-file file target t keep-time))
+                         (sleep-for dupan-sleep-ticks)))))))
 
 (defun dupan-handle:rename-file (file newname &optional ok-if-already-exists)
   (cond
@@ -788,7 +813,9 @@
 (defun dupan-dired-create-files-advice (fn file-creator operation fn-list name-constructor &optional marker-char)
   "优化在 Dired 中 Mark 多个文件后进行的复制或移动操作。
 默认情况是在一个循环中反复调用 dired-do-xxx 方法，这样容易导致抛出 '调用频繁' 的错误，所以利用已有 API 改成批量处理。"
-  (if (and (> (length fn-list) 1) (dupan-file-p (car fn-list)))
+  (if (and (> (length fn-list) 1)
+           (dupan-file-p (car fn-list))
+           (dupan-file-p (funcall name-constructor (car fn-list))))
       (let* ((len (length fn-list))
              (first (funcall name-constructor (car fn-list)))
              (dir (dupan-normalize (file-name-directory first)))
