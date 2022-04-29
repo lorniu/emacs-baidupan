@@ -402,25 +402,28 @@
     ;; 即使删除失败，也不会有错误码。闹那般啊！
     (alist-get 'info (dupan-make-request url :data data))))
 
-(cl-defmethod dupan-req ((_ (eql 'copy)) from to)
-  (let* ((dest (file-name-directory to))
-         (newname (file-name-nondirectory to))
-         (files (json-encode `(((path . ,(url-hexify-string from))
-                                (dest . ,(url-hexify-string dest))
-                                (newname . ,(url-hexify-string newname))))))
-         (url (dupan-make-url 'file :method 'filemanager :opera 'copy))
-         (data `((async . 0) (filelist . ,files))))
+(defun dupan--copy-or-move (type from to)
+  "在网盘中进行文件的复制或移动。通常 FROM 和 TO 表示的从哪个文件复制或移动为哪个文件。
+如果 FROM 是个列表且 TO 是个文件夹，那么是将 FROM 中所有文件复制或移动到 TO 文件夹的意思。"
+  (cl-assert (member type '(copy move)))
+  (let* ((single (atom from))
+         (dest (if single (file-name-directory to) to))
+         (data `((async . 0)
+                 (filelist . ,(json-encode
+                               (cl-loop
+                                for f in (if single (list from) from)
+                                collect `((path . ,(url-hexify-string f))
+                                          (dest . ,(url-hexify-string dest))
+                                          (newname . ,(url-hexify-string
+                                                       (file-name-nondirectory (if single to f))))))))))
+         (url (dupan-make-url 'file :method 'filemanager :opera type)))
     (dupan-make-request url :data data)))
 
+(cl-defmethod dupan-req ((_ (eql 'copy)) from to)
+  (dupan--copy-or-move 'copy from to))
+
 (cl-defmethod dupan-req ((_ (eql 'move)) from to)
-  (let* ((dest (file-name-directory to))
-         (newname (file-name-nondirectory to))
-         (files (json-encode `(((path . ,(url-hexify-string from))
-                                (dest . ,(url-hexify-string dest))
-                                (newname . ,(url-hexify-string newname))))))
-         (url (dupan-make-url 'file :method 'filemanager :opera 'move))
-         (data `((async . 0) (filelist . ,files))))
-    (dupan-make-request url :data data)))
+  (dupan--copy-or-move 'move from to))
 
 (defun dupan--upload-precreate (from to &optional overridep)
   "进行预上传。"
@@ -778,6 +781,53 @@
 (defun dupan-handle:set-visited-file-modtime (&rest _) nil)
 (defun dupan-handle:verify-visited-file-modtime (&optional _buf) t)
 (defun dupan-handle:file-selinux-context (&rest _) nil)
+
+
+;;; Patches
+
+(defun dupan-dired-create-files-advice (fn file-creator operation fn-list name-constructor &optional marker-char)
+  "优化在 Dired 中 Mark 多个文件后进行的复制或移动操作。
+默认情况是在一个循环中反复调用 dired-do-xxx 方法，这样容易导致抛出 '调用频繁' 的错误，所以利用已有 API 改成批量处理。"
+  (if (and (> (length fn-list) 1) (dupan-file-p (car fn-list)))
+      (let* ((len (length fn-list))
+             (first (funcall name-constructor (car fn-list)))
+             (dir (dupan-normalize (file-name-directory first)))
+             (files (mapcar #'dupan-normalize fn-list))
+             (check-fn (lambda (files dir)
+                         (cl-loop with fs = (dupan-req 'list dir)
+                                  for f in files
+                                  for n = (file-name-nondirectory f)
+                                  for p = (expand-file-name n dir)
+                                  if (cl-find-if (lambda (x) (string= (alist-get 'path x) p)) fs)
+                                  collect n into dups
+                                  finally (when dups
+                                            (user-error
+                                             "目标文件夹中已存在文件: %s。操作中止。"
+                                             (mapconcat #'identity dups "、"))))
+                         (message "总共 %d 个文件，请等待..." (length files))))
+             (refresh-fn (lambda (&optional movep)
+                           (dolist (f fn-list)
+                             (condition-case nil
+                                 (dired-add-file (expand-file-name (file-name-nondirectory f) (file-name-directory first)))
+                               (error (user-error "操作成功。显示出错，按 'g' 手动刷新 Dired 文件夹。")))
+                             (if movep (dired-remove-file f))
+                             (sleep-for 0.3))))) ; wait for ?
+        (dupan-info "[dired-create-files-advice] %s, %s, %s, %s" file-creator operation files first)
+        (cond ((and (equal file-creator 'dired-copy-file) (string= operation "Copy")) ; 多个文件的复制
+               (funcall check-fn files dir)
+               (dupan-req 'copy files dir)
+               (funcall refresh-fn))
+              ((and (equal file-creator 'dired-rename-file) (string= operation "Move")) ; 多个文件的移动
+               (funcall check-fn files dir)
+               (dupan-req 'move files dir)
+               (funcall refresh-fn t))
+              (t (user-error "未知操作: dired-create-files - %s, %s" file-creator operation)))
+        (dired-move-to-filename)
+        (message "完成 (%s/%s)" len len))
+    ;; 默认逻辑
+    (funcall fn file-creator operation fn-list name-constructor marker-char)))
+
+(advice-add #'dired-create-files :around #'dupan-dired-create-files-advice)
 
 
 
