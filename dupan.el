@@ -22,8 +22,7 @@
 ;;  2. 确保拥有百度帐号后，执行 `M-x dupan-add-account` 命令生成记录身份信息的配置文件
 ;;  3. 之后，使用 `M-x dupan-find` 搜索网盘文件并打开。
 ;;     亦或使用 `C-x C-f /dp:/网盘文件路径` 直接打开指定文件。
-;;
-;; 草草实现，未尽其精。随君自取，维护随缘。如此而已。
+;;  4. 你可以继续执行 `M-x dupan-add-account` 添加另外的帐号，并使用 `M-x dupan-switch-account` 进行切换。
 ;;
 
 ;;; Code:
@@ -542,7 +541,6 @@
   ;; 有些插件对这种 tramp 方式的文件访问支持不够好，为避免问题，暂时硬核打补丁
   (cond ((string-match-p "~/" filename) nil)
         ((string-match-p "[/.]tags$" filename) nil) ; citre
-        ((string-match-p "/\\." filename) t)
         (t (dupan--find-with-cache filename))))
 
 (defun dupan-handle:file-readable-p (filename)
@@ -553,9 +551,8 @@
 (defun dupan-handle:file-directory-p (filename)
   (when (file-exists-p filename)
     (setq filename (dupan-normalize filename))
-    (and (not (string-match-p "/\\." filename))
-         (let ((f (dupan--find-with-cache filename)))
-           (equal (alist-get 'isdir f) 1)))))
+    (let ((f (dupan--find-with-cache filename)))
+      (equal (alist-get 'isdir f) 1))))
 
 (defun dupan-handle:file-executable-p (filename)
   (file-directory-p filename))
@@ -670,6 +667,10 @@
   "Async, so make `directory-files' return nil, and loading here."
   (dupan-info "[handler] insert-directory: %s" filename)
   (setq filename (expand-file-name filename))
+
+  ;; 默认 `project-current' 会尝试搜索所有 vcs 文件夹来确定项目目录
+  ;; 这会导致亿吨的请求，引发卡顿和调用频繁错误。所以干脆禁掉
+  (setq-local project-find-functions nil)
 
   (if (not full-directory-p)
       (let* ((attrs (file-attributes filename))
