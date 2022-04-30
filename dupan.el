@@ -40,13 +40,19 @@
   "用来控制调试信息的输出。"
   :type 'boolean)
 
+(defcustom dupan-config-file (locate-user-emacs-file ".pan-baidu-com")
+  "用于保存身份信息的配置文件。"
+  :type 'string)
+
+(defcustom dupan-sleep-ticks 0.3
+  "无聊的参数。为了避免过多的 '请求过于频繁'，让某些 API 在请求中有这些时间的等待时间。"
+  :type 'number)
+
 (defvar dupan-prefix "/dp:")
 
 (defvar dupan--config nil)
 
-(defvar dupan--config-file (locate-user-emacs-file ".pan-baidu-com"))
-
-(defvar dupan--urls
+(defconst dupan--urls
   `((auth        . "https://openapi.baidu.com/oauth/2.0/authorize")
     (token       . "https://openapi.baidu.com/oauth/2.0/token")
     (quota       . "https://pan.baidu.com/api/quota")
@@ -55,7 +61,7 @@
     (multimedia  . "https://pan.baidu.com/rest/2.0/xpan/multimedia")
     (superfile   . "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2")))
 
-(defvar dupan--errors
+(defconst dupan--errors
   `((-6    . "身份验证失败")
     (-7    . "文件或目录名错误或无权访问")
     (-8    . "文件或目录已存在")
@@ -73,9 +79,8 @@
     (31362 . "签名错误，请检查链接地址是否完整")
     (31363 . "分片缺失")
     (31364 . "超出分片大小限制")
-    (42214 . "文件基础信息查询失败")))
-
-(defvar dupan-sleep-ticks 0.3 "为了避免过多的 '请求过于频繁'，所以休息一下再继续。。。")
+    (42214 . "文件基础信息查询失败"))
+  "这些错误码是根据文档并在尝试中猜的，不一定都对。不知道有没有具体的文档说明。")
 
 
 ;;; Utility
@@ -235,9 +240,9 @@
 (defun dupan-add-account ()
   "用来生成包含身份验证信息的配置文件。"
   (interactive)
-  (if (and (file-exists-p dupan--config-file)
+  (if (and (file-exists-p dupan-config-file)
            (not (y-or-n-p (format "配置文件 %s 已存在，并存在帐号 %s，继续将添加新的帐号。是否继续？"
-                                  dupan--config-file
+                                  dupan-config-file
                                   (progn
                                     (dupan-load-config)
                                     (mapconcat (lambda (acc) (alist-get 'name acc)) dupan--config "、"))))))
@@ -273,10 +278,10 @@
                                (alist-get 'baidu_name (dupan-req 'uinfo)))))
                   (setf (alist-get 'name account) name)
                   (setq dupan--config (append dupan--config (list account)))
-                  (with-temp-file dupan--config-file
+                  (with-temp-file dupan-config-file
                     (pp dupan--config (current-buffer)))
                   (if newp
-                      (message "配置文件 %s 生成成功!" dupan--config-file)
+                      (message "配置文件 %s 生成成功!" dupan-config-file)
                     (message "帐号 %s 添加成功。可以使用 'dupan-switch-account' 切换帐号。" name)))))))))))
 
 ;;;###autoload
@@ -293,22 +298,22 @@
                            if (string-equal name (alist-get 'name acc)) collect acc into first
                            else collect acc into others
                            finally return (append first others))))
-      (with-temp-file dupan--config-file
+      (with-temp-file dupan-config-file
         (pp newcf (current-buffer)))
       (dupan-load-config))))
 
 (defun dupan-load-config ()
-  (if (file-exists-p dupan--config-file)
+  (if (file-exists-p dupan-config-file)
       (let (accs)
         (ignore-errors
           (let ((rs (with-temp-buffer
-                      (insert-file-contents dupan--config-file)
+                      (insert-file-contents dupan-config-file)
                       (read (current-buffer)))))
             (setq accs (if (consp (caar rs)) rs (list rs)))))
         (unless (alist-get 'refresh-token (car accs))
-          (user-error "配置文件 %s 存在错误。" dupan--config-file))
+          (user-error "配置文件 %s 存在错误。" dupan-config-file))
         (setq dupan--config accs))
-    (user-error "没找到配置文件 '%s', 请先调用 'M-x dupan-add-account' 生成一个" dupan--config-file)))
+    (user-error "没找到配置文件 '%s', 请先调用 'M-x dupan-add-account' 生成一个" dupan-config-file)))
 
 (defun dupan-get-config (&optional force)
   (or (unless force dupan--config)
@@ -331,7 +336,7 @@
                            (etime (time-add (current-time) (seconds-to-time (- (alist-get 'expires_in result) 120)))))
                       (setf (alist-get 'access-token dupan--config) tk)
                       (setf (alist-get 'expires-in dupan--config) etime)
-                      (with-temp-file dupan--config-file
+                      (with-temp-file dupan-config-file
                         (prin1 dupan--config (current-buffer))))))
         (let ((url (dupan-make-url 'token
                      :grant_type "refresh_token"

@@ -20,9 +20,9 @@ U1S1，用于阅读文档、简单编辑、文件整理等，这个比官方的�
 
   1. 下载本文件，并加载之 (通过 `load` 或 `require`)
   2. 确保拥有百度帐号，执行 `M-x dupan-add-account` 添加帐号信息到配置文件
-  3. 之后，使用 `M-x dupan-find` 搜索网盘文件并打开。亦或使用 `C-x C-f /dp:/网盘文件路径` 直接打开指定文件。
-
-  你可以继续执行 `M-x dupan-add-account` 添加另外的帐号，并使用 `M-x dupan-switch-account` 进行切换。
+  3. 之后，使用 `M-x dupan-find` 搜索网盘文件并打开。亦或使用 `C-x C-f /dp:/网盘文件路径` 直接打开指定文件
+  4. 在打开的 Dired 中，你可以使用 `C` 完成复制、上传、下载，当前支持文件夹的增量式上传下载
+  5. 你可以继续执行 `M-x dupan-add-account` 添加另外的帐号，并使用 `M-x dupan-switch-account` 进行切换
 
 ## 相关链接
 
