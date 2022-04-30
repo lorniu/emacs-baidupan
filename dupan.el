@@ -198,26 +198,35 @@
 
 (defvar-local dupan--local-files nil "用于 Dired buffer 中缓存文件夹下所有文件的信息。")
 
-(defun dupan--find-with-cache (filename)
-  (let ((cached (cl-find-if (lambda (f) (string= (alist-get 'path f) filename)) dupan--local-files)))
-    (unless cached
-      (let ((f (dupan-req 'finfo filename)))
-        (push f dupan--local-files)
-        (setq cached f)))
-    cached))
+(defun dupan--find-with-cache (filename &optional renew)
+  (let (ret)
+    (unless renew
+      (setq ret (cl-find-if (lambda (f) (string= (alist-get 'path f) filename)) dupan--local-files)))
+    (when (or renew (null ret))
+      (setq dupan--local-files
+            (cl-remove-if (lambda (f) (string= (alist-get 'path f) filename)) dupan--local-files))
+      (when-let ((file (dupan-req 'finfo filename)))
+        (push file dupan--local-files)
+        (setq ret file)))
+    ret))
 
 (defvar dupan--ttl-cache nil "全局缓存，可保持数据存活若干时间。主要用来缓解 31034 号错误太多的问题。")
 (defvar dupan--ttl-time 8 "默认存活 8 秒")
 
+(defun dupan-set-ttl-cache (key value)
+  (setq dupan--ttl-cache (assoc-delete-all key dupan--ttl-cache))
+  (when value
+    (push (cons key (cons value (current-time))) dupan--ttl-cache)))
+
 (defmacro dupan-with-ttl-cache (key &rest body)
   "优先取缓存。"
   (declare (indent 1))
-  `(let* ((cache (cdr (assoc-string ,key dupan--ttl-cache))))
+  `(let* ((key ,key)
+          (cache (cdr (assoc-string key dupan--ttl-cache))))
      (if (and cache (< (time-to-seconds (time-since (cdr cache))) dupan--ttl-time))
-         (progn (dupan-info "命中缓存 (%s)..." ,key) (car cache))
-       (setq dupan--ttl-cache (assoc-delete-all ,key dupan--ttl-cache))
+         (progn (dupan-info "[命中缓存] %s: %s..." key (car cache)) (car cache))
        (prog1 (setq cache (progn ,@body))
-         (push (cons ,key (cons cache (current-time))) dupan--ttl-cache)))))
+         (dupan-set-ttl-cache key cache)))))
 
 
 ;;; Authorization
@@ -340,7 +349,7 @@
   (dupan-info "正请求 %s %s..." func args)
   (dupan-get-token)
   (cond ((eql func 'finfo)
-         (dupan-with-ttl-cache (md5 (format "finfo+%s" args))
+         (dupan-with-ttl-cache (concat "finfo:" (car args))
            (cl-call-next-method)))
         (t (apply #'cl-call-next-method func args))))
 
@@ -536,12 +545,13 @@
          (inhibit-file-name-operation operation))
     (apply operation args)))
 
-(defun dupan-handle:file-exists-p (filename)
+(defun dupan-handle:file-exists-p (filename &optional nocache)
+  (dupan-info "[handler] file-exists-p: %s" filename)
   (setq filename (dupan-normalize filename))
   ;; 有些插件对这种 tramp 方式的文件访问支持不够好，为避免问题，暂时硬核打补丁
   (cond ((string-match-p "~/" filename) nil)
         ((string-match-p "[/.]tags$" filename) nil) ; citre
-        (t (dupan--find-with-cache filename))))
+        (t (dupan--find-with-cache filename nocache))))
 
 (defun dupan-handle:file-readable-p (filename)
   ;; 有些插件对这种 tramp 方式的文件访问支持不够好，为避免问题，暂时硬核打补丁
@@ -549,15 +559,17 @@
         (t t)))
 
 (defun dupan-handle:file-directory-p (filename)
+  (dupan-info "[handler] file-directory-p: %s" filename)
   (when (file-exists-p filename)
     (setq filename (dupan-normalize filename))
-    (let ((f (dupan--find-with-cache filename)))
-      (equal (alist-get 'isdir f) 1))))
+    (let ((finfo (dupan--find-with-cache filename)))
+      (equal (alist-get 'isdir finfo) 1))))
 
 (defun dupan-handle:file-executable-p (filename)
   (file-directory-p filename))
 
 (defun dupan-handle:file-regular-p (file)
+  (dupan-info "[handler] file-regular-p: %s" filename)
   (not (file-directory-p file)))
 
 (defun dupan-handle:file-remote-p (file &optional identification _connected)
@@ -605,7 +617,8 @@
    ((and (not (dupan-file-p file)) (dupan-file-p newname))
     (dupan-req 'upload file (dupan-normalize newname) ok-if-already-exists))))
 
-(defun dupan-handle:copy-directory (directory newname &optional keep-time parents copy-contents)
+(defun dupan-handle:copy-directory (directory newname &optional keep-time parents copy-contents incp)
+  "参数 INCP 表示开启了增量上传，即代表目标文件夹已经存在时的策略。"
   (cond
    ((and (dupan-file-p directory) (dupan-file-p newname))
     (if parents (make-directory
@@ -613,29 +626,40 @@
                  parents))
     (copy-file directory newname nil keep-time parents copy-contents))
    ((and (not (dupan-file-p directory)) (dupan-file-p newname))
-    (if (file-exists-p newname)
-        (user-error "文件夹已存在，无法上传（暂不支持增量上传）。")
-      (make-directory newname t)
-      (dolist (file (directory-files directory 'full directory-files-no-dot-files-regexp))
-        (let ((target (concat (file-name-as-directory newname) (file-name-nondirectory file)))
-	          (filetype (car (file-attributes file))))
-	      (if (eq filetype t)
-	          (copy-directory file target keep-time parents t)
-            (message "上传文件 %s..." file)
-	        (copy-file file target t keep-time))
-          (sleep-for dupan-sleep-ticks)))))
+    (when (directory-name-p newname)
+      (setq newname (concat newname (file-name-nondirectory directory))))
+    (let ((existp (dupan-handle:file-exists-p newname t)))
+      (when (or (not existp) incp (setq incp (y-or-n-p "文件夹已存在，是否增量上传（只上传网盘中不存在的文件）？")))
+        (unless existp (make-directory newname t))
+        (let* ((locals (directory-files directory 'full directory-files-no-dot-files-regexp))
+               (remotes (if incp (dupan-req 'list (dupan-normalize newname)))))
+          (dolist (file locals)
+            (let ((target (concat (file-name-as-directory newname) (file-name-nondirectory file))))
+              (if (file-directory-p file)
+                  (dupan-handle:copy-directory file target keep-time parents t incp)
+                (when (or (not incp)
+                          (not (cl-find-if (lambda (r) (string= (file-name-nondirectory file) (alist-get 'server_filename r))) remotes)))
+                  (message "上传文件 %s..." file target)
+                  (copy-file file target t keep-time)))
+              (sleep-for dupan-sleep-ticks)))))))
    ((and (dupan-file-p directory) (not (dupan-file-p newname)))
-    (if (file-exists-p newname)
-        (user-error "文件夹已存在，不能继续下载（暂不支持增量下载）。")
-      (make-directory newname t)
-      (cl-loop with list = (dupan-req 'list (dupan-normalize directory))
-               for file in (mapcar (lambda (f) (dupan-normalize (alist-get 'path f) t)) list)
-               for target = (expand-file-name (file-name-nondirectory file) newname)
-               do (progn (if (eq (car (file-attributes file)) t)
-                             (copy-directory file target keep-time parents t)
-                           (message "下载文件 %s..." file)
-	                       (copy-file file target t keep-time))
-                         (sleep-for dupan-sleep-ticks)))))))
+    (when (directory-name-p newname)
+      (setq newname (concat newname (file-name-nondirectory directory))))
+    (let ((existp (file-exists-p newname)))
+      (when (or (not existp) incp (setq incp (y-or-n-p "文件夹已存在，是否增量下载（只下载本地不存在的文件）？")))
+        (unless existp (make-directory newname t))
+        (let* ((remotes (dupan-req 'list (dupan-normalize directory)))
+               (locals (directory-files newname 'full directory-files-no-dot-files-regexp)))
+          (dolist (file remotes)
+            (let ((path (alist-get 'path file))
+                  (target (concat (file-name-as-directory newname) (alist-get 'server_filename file))))
+              (if (equal (alist-get 'isdir file) 1)
+                  (dupan-handle:copy-directory (dupan-normalize path t) target keep-time parents t incp)
+                (when (or (not incp)
+                          (not (cl-find-if (lambda (l) (string= (alist-get 'server_filename file) (file-name-nondirectory l))) locals)))
+                  (message "下载文件 %s..." path)
+                  (copy-file (dupan-normalize path t) target t keep-time)))
+              (sleep-for dupan-sleep-ticks)))))))))
 
 (defun dupan-handle:rename-file (file newname &optional ok-if-already-exists)
   (cond
@@ -740,7 +764,7 @@
   (dupan-info "[handler] write-region: %s, %s, %s" filename beg end)
   (cl-assert (not append))
   (setq filename (dupan-normalize filename))
-  (let* ((tmpfile (make-temp-file (file-name-nondirectory filename))))
+  (let ((tmpfile (make-temp-file (file-name-nondirectory filename))))
     (unwind-protect
         (let (create-lockfiles)
           (write-region beg end tmpfile nil 'no-message)
@@ -756,16 +780,17 @@
 
 (defun dupan-handle:file-local-copy (filename)
   (dupan-info "[handler] file-local-copy: %s" filename)
-  (if (not (file-exists-p filename))
-      (error "File to copy doesn't exist")
-    (setq filename (dupan-normalize filename))
-    (let* ((f (dupan-req 'finfo filename t))
-           (dlink (alist-get 'dlink f))
-           (newname (concat temporary-file-directory
-                            (make-temp-name (file-name-nondirectory filename))
-                            "." (file-name-extension filename))))
-      (dupan-req 'download dlink newname)
-      newname)))
+  (setq name (dupan-normalize filename))
+  (dupan-set-ttl-cache (concat "finfo:" name) nil)
+  (let ((finfo (dupan-req 'finfo name t)))
+    (if (file-exists-p filename)
+        (let ((dlink (alist-get 'dlink finfo))
+              (newname (concat temporary-file-directory
+                               (make-temp-name (file-name-nondirectory name))
+                               "." (file-name-extension name))))
+          (dupan-req 'download dlink newname)
+          newname)
+      (user-error "要复制的文件 %s 不存在" filename))))
 
 (defun dupan-handle:dired-insert-directory (dir switches &optional file-list wildcard _hdr)
   (dupan-info "[handler] dired-insert-directory: %s" dir)
@@ -782,7 +807,7 @@
       (error (user-error "文件 '%s' 没找到" file)))
     (when (and localfile (file-exists-p localfile))
       (let ((signal-hook-function (unless noerror signal-hook-function))
-	        (inhibit-message (or inhibit-message nomessage)))
+            (inhibit-message (or inhibit-message nomessage)))
         (unwind-protect
             (load localfile noerror t nosuffix must-suffix))
         (delete-file localfile)))))
