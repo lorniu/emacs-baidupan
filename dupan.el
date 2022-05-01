@@ -158,10 +158,6 @@
   (when dupan-debug
     (apply 'message (concat "\t[百度网盘] " fmt-string) args)))
 
-(defmacro dupan-with-suppress-message (&rest body)
-  `(let ((message-log-max nil))
-     (with-temp-message "" ,@body)))
-
 (defun dupan-normalize (path &optional force-prefix-p)
   (when (and path (string-match-p (concat "^" dupan-prefix) path))
     (setq path (substring path (length dupan-prefix))))
@@ -507,8 +503,9 @@
         (dupan-make-request url :data data)))))
 
 (cl-defmethod dupan-req ((_ (eql 'download)) dlink to)
-  (dupan-with-suppress-message
-   (url-copy-file (dupan-make-url dlink) to)))
+  (with-temp-message nil
+    (let ((url (dupan-make-url dlink)))
+      (url-copy-file url to))))
 
 (cl-defmethod dupan-req ((_ (eql 'streaming)) path &optional ad-token)
   "用来获取视频播放 M3U8 文件。TODO: 需要完善。"
@@ -817,6 +814,24 @@
             (load localfile noerror t nosuffix must-suffix))
         (delete-file localfile)))))
 
+(defun dupan--file-download-message (url finfo)
+  "根据文件信息，确定要向外输出的 dlink 及相关外部下载命令。"
+  (let* ((path (alist-get 'path finfo))
+         (name (alist-get 'server_filename finfo))
+         (durl (format "curl -L '%s' -H 'User-Agent: pan.baidu.com'" url)) ; 暂时只输出 curl 的命令行
+         (fmt "[百度网盘] 文件 `%s' 可使用如下命令下载（复制使用）：\n\n%s -o '%s'\n"))
+    (format fmt path durl name)))
+
+(defun dupan-handle:process-file (program &optional infile buffer display &rest args)
+  (when-let ((name (and (equal program "file") (equal (car args) "--") (cadr args))))
+    (let ((file (dupan-normalize (expand-file-name name))))
+      (dupan-set-ttl-cache (concat "finfo:" file) nil)
+      (let ((finfo (dupan-req 'finfo file t)))
+        (if (equal (alist-get 'isdir finfo) 0)
+            (let ((url (dupan-make-url (alist-get 'dlink finfo))))
+              (user-error "%s" (dupan--file-download-message url finfo)))
+          (user-error "当前文件夹: %s" file))))))
+
 ;; Rude handling
 
 (defun dupan-handle:file-writable-p (_) t)
@@ -828,7 +843,6 @@
 (defun dupan-handle:find-backup-file-name (&rest _) nil)
 (defun dupan-handle:unhandled-file-name-directory (&rest _) nil)
 (defun dupan-handle:start-file-process (&rest _) nil)
-(defun dupan-handle:process-file (&rest _) nil)
 (defun dupan-handle:shell-command (&rest _) nil)
 (defun dupan-handle:executable-find (_) nil)
 (defun dupan-handle:vc-registered (&rest _) nil)
