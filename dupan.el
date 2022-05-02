@@ -82,6 +82,8 @@
     (42214 . "文件基础信息查询失败"))
   "这些错误码是根据文档并在尝试中猜的，不一定都对。不知道有没有具体的文档说明。")
 
+(defvar dupan-make-download-cmdline-function #'dupan-make-curl-download-cmdline)
+
 
 ;;; Utility
 
@@ -193,6 +195,11 @@
            until (>= (* i dupan-slice-size) fs)
            collect (cons (* i dupan-slice-size)
                          (min (* (+ i 1) dupan-slice-size) fs))))
+
+(defun dupan-make-curl-download-cmdline (dlink meta)
+  "生成使用 curl 进行下载的命令行语句。DLINK 为下载地址，META 包含下载文件的基本信息。"
+  (let ((name (alist-get 'server_filename meta)))
+    (format "curl -L '%s' -H 'User-Agent: pan.baidu.com' -o '%s'" dlink name)))
 
 
 ;;; Cache
@@ -818,22 +825,23 @@
             (load localfile noerror t nosuffix must-suffix))
         (delete-file localfile)))))
 
-(defun dupan--file-download-message (url finfo)
-  "根据文件信息，确定要向外输出的 dlink 及相关外部下载命令。"
-  (let* ((path (alist-get 'path finfo))
-         (name (alist-get 'server_filename finfo))
-         (durl (format "curl -L '%s' -H 'User-Agent: pan.baidu.com'" url)) ; 暂时只输出 curl 的命令行
-         (fmt "[百度网盘] 文件 `%s' 可使用如下命令下载（复制使用）：\n\n%s -o '%s'\n"))
-    (format fmt path durl name)))
-
 (defun dupan-handle:process-file (program &optional infile buffer display &rest args)
   (when-let ((name (and (equal program "file") (equal (car args) "--") (cadr args))))
-    (let ((file (dupan-normalize (expand-file-name name))))
-      (dupan-set-ttl-cache (concat "finfo:" file) nil)
-      (let ((finfo (dupan-req 'finfo file t)))
+    (let ((file (dupan-normalize (expand-file-name name)))
+          (repeat (equal last-command 'dired-show-file-type)))
+      (unless repeat
+        (dupan-set-ttl-cache (concat "finfo:" file) nil))
+      (let* ((finfo (dupan-req 'finfo file t))
+             (dlink (alist-get 'dlink finfo))
+             (path (alist-get 'path finfo)))
         (if (equal (alist-get 'isdir finfo) 0)
-            (let ((url (dupan-make-url (alist-get 'dlink finfo))))
-              (user-error "%s" (dupan--file-download-message url finfo)))
+            (if (not repeat)
+                (user-error "文件 `%s' 的 dlink 为:\n\n%s\n\n继续按 y 复制下载命令。" path dlink)
+              (let ((durl (funcall dupan-make-download-cmdline-function (dupan-make-url dlink) finfo)))
+                (with-temp-buffer
+                  (insert durl)
+                  (clipboard-kill-ring-save (point-min) (point-max))
+                  (user-error "文件 '%s' 的下载命令已复制，请到终端中粘贴使用。" path))))
           (user-error "当前文件夹: %s" file))))))
 
 ;; Rude handling
