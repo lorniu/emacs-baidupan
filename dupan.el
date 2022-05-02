@@ -582,6 +582,10 @@
     ((localname) (dupan-normalize file))
     (t dupan-prefix)))
 
+(defun dupan-handle:expand-file-name (name &optional dir)
+  (if (string-prefix-p dupan-prefix name) name
+    (dupan-run-real-handler #'expand-file-name (list name dir))))
+
 (defun dupan-handle:file-name-directory (filename)
   (if (string-match (concat "^\\(" dupan-prefix ".*/\\).*$") filename)
       (match-string 1 filename)
