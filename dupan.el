@@ -82,6 +82,18 @@
     (42214 . "文件基础信息查询失败"))
   "这些错误码是根据文档并在尝试中猜的，不一定都对。不知道有没有具体的文档说明。")
 
+(defvar-local dupan--sort-type nil
+  "Dired 中文件列表的排序方式，为 `dupan--sorts' 中的一项。")
+
+(defconst dupan--sorts
+  '(("name" . nil)
+    ("name" . t)
+    ("time" . t)
+    ("time" . nil)
+    ("size" . t)
+    ("size" . nil))
+  "按啥排序。(排序依据 . 是否逆序)")
+
 (defvar dupan-make-download-cmdline-function #'dupan-make-curl-download-cmdline)
 
 
@@ -369,9 +381,12 @@
 
 (cl-defmethod dupan-req ((_ (eql 'list)) dir &optional callback)
   "当带回调函数的时候，使用异步的方式进行请求，否则同步。"
-  (let* ((url (dupan-make-url 'file
+  (let* ((ord (or dupan--sort-type (car dupan--sorts)))
+         (url (dupan-make-url 'file
                 :method 'list :dir (url-hexify-string (or dir "/"))
-                :start 0 :limit 1000 :web 0 :folder 0)))
+                :start 0 :limit 1000 :web 0 :folder 0 :order (car ord))))
+    (when (cdr ord)
+      (setq url (concat url "&desc=1")))
     (if callback
         (dupan-make-request url :callback
                             (lambda (res)
@@ -912,6 +927,27 @@
     (funcall fn file-creator operation fn-list name-constructor marker-char)))
 
 (advice-add #'dired-create-files :around #'dupan-dired-create-files-advice)
+
+(defun dupan-dired-sort-toggle-advice (fn)
+  "定义 dupan 文件的排序逻辑，使用 `completing-read' 的方式进行交互选择。"
+  (if (and default-directory (dupan-file-p default-directory))
+      (let* ((norm (lambda (s) (concat (car s) (if (cdr s) " desc"))))
+             (oldsort (or dupan--sort-type (car dupan--sorts)))
+             (choose (completing-read "切换到排序方式: "
+                                      (cl-loop for s in dupan--sorts
+                                               unless (equal s oldsort)
+                                               collect (funcall norm s))
+                                      nil t))
+             (newsort (cl-find-if (lambda (s) (string= (funcall norm s) choose)) dupan--sorts)))
+        (setq-local dupan--sort-type newsort)
+        (setq mode-name (concat "Dired by "
+                                (car dupan--sort-type)
+                                (if (cdr dupan--sort-type) " desc")))
+        (force-mode-line-update)
+        (revert-buffer))
+    (funcall fn)))
+
+(advice-add #'dired-sort-toggle :around #'dupan-dired-sort-toggle-advice)
 
 
 
