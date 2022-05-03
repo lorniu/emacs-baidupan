@@ -602,7 +602,7 @@
     ((user) "")
     ((host) "")
     ((localname) (dupan-normalize file))
-    (t dupan-prefix)))
+    (t (concat dupan-prefix "/"))))
 
 (defun dupan-handle:expand-file-name (name &optional dir)
   (if (string-prefix-p dupan-prefix name) name
