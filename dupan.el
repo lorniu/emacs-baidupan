@@ -30,6 +30,7 @@
 (require 'json)
 (require 'cl-lib)
 (require 'url-http)
+(require 'dired-aux)
 
 (defgroup dupan nil
   "百度网盘客户端。"
@@ -158,8 +159,9 @@
                    (if msg (concat " (" msg ")") ""))))))))
 
 (defun dupan-make-multipart-body (data to)
-  "使用 `mm-url-encode-multipart-form-data' 生成的 form-data 总报 maybe request body not standard 的错误。
-莫名其妙，干脆自己拼得了。"
+  "生成 form-data。
+使用 `mm-url-encode-multipart-form-data' 生成的 form-data 总报
+maybe request body not standard 的错误。莫名其妙，干脆自己拼得了。"
   (let* ((boundary "--------------------------94c6bfb89dd7d006")
          (body (concat "--" boundary "--\r\n"
                        "Content-Disposition: form-data; name=\"file\"; filename=\"" (url-encode-url (url-file-nondirectory to)) "\"\r\n"
@@ -592,9 +594,9 @@
 (defun dupan-handle:file-executable-p (filename)
   (file-directory-p filename))
 
-(defun dupan-handle:file-regular-p (file)
+(defun dupan-handle:file-regular-p (filename)
   (dupan-info "[handler] file-regular-p: %s" filename)
-  (not (file-directory-p file)))
+  (not (file-directory-p filename)))
 
 (defun dupan-handle:file-remote-p (file &optional identification _connected)
   (cl-case identification
@@ -667,7 +669,7 @@
                   (dupan-handle:copy-directory file target keep-time parents t incp)
                 (when (or (not incp)
                           (not (cl-find-if (lambda (r) (string= (file-name-nondirectory file) (alist-get 'server_filename r))) remotes)))
-                  (message "上传文件 %s..." file target)
+                  (message "上传文件 %s..." file)
                   (copy-file file target t keep-time)))
               (sleep-for dupan-sleep-ticks)))))))
    ((and (dupan-file-p directory) (not (dupan-file-p newname)))
@@ -704,7 +706,7 @@
 
 (defun dupan-handle:file-modes (&rest _) 492)
 
-(defun dupan-handle:file-attributes (filename &optional _id-format ometadata)
+(defun dupan-handle:file-attributes (filename &optional _id-format _ometadata)
   (dupan-info "[handler] file-attributes: %s" filename)
   (setq filename (dupan-normalize filename))
   (let* ((finfo (dupan--find-with-cache filename))
@@ -715,7 +717,7 @@
     ;; folder? / links / UID / GID / atime / mtime / ctime / size / perm
     (list folder 1 0 0 date date date (or size 0) perm t nil nil)))
 
-(defun dupan-handle:insert-directory (filename _switches &optional wildcard full-directory-p)
+(defun dupan-handle:insert-directory (filename _switches &optional _wildcard full-directory-p)
   "Async, so make `directory-files' return nil, and loading here."
   (dupan-info "[handler] insert-directory: %s" filename)
   (setq filename (expand-file-name filename))
@@ -808,17 +810,17 @@
 
 (defun dupan-handle:file-local-copy (filename)
   (dupan-info "[handler] file-local-copy: %s" filename)
-  (setq name (dupan-normalize filename))
-  (dupan-set-ttl-cache (concat "finfo:" name) nil)
-  (let ((finfo (dupan-req 'finfo name t)))
-    (if (file-exists-p filename)
-        (let ((dlink (alist-get 'dlink finfo))
-              (newname (concat temporary-file-directory
-                               (make-temp-name (file-name-nondirectory name))
-                               "." (file-name-extension name))))
-          (dupan-req 'download dlink newname)
-          newname)
-      (user-error "要复制的文件 %s 不存在" filename))))
+  (let ((name (dupan-normalize filename)))
+    (dupan-set-ttl-cache (concat "finfo:" name) nil)
+    (let ((finfo (dupan-req 'finfo name t)))
+      (if (file-exists-p filename)
+          (let ((dlink (alist-get 'dlink finfo))
+                (newname (concat temporary-file-directory
+                                 (make-temp-name (file-name-nondirectory name))
+                                 "." (file-name-extension name))))
+            (dupan-req 'download dlink newname)
+            newname)
+        (user-error "要复制的文件 %s 不存在" filename)))))
 
 (defun dupan-handle:dired-insert-directory (dir switches &optional file-list wildcard _hdr)
   (dupan-info "[handler] dired-insert-directory: %s" dir)
@@ -840,7 +842,7 @@
             (load localfile noerror t nosuffix must-suffix))
         (delete-file localfile)))))
 
-(defun dupan-handle:process-file (program &optional infile buffer display &rest args)
+(defun dupan-handle:process-file (program &optional _infile _buffer _display &rest args)
   (when-let ((name (and (equal program "file") (equal (car args) "--") (cadr args))))
     (let ((file (dupan-normalize (expand-file-name name)))
           (repeat (equal last-command 'dired-show-file-type)))
