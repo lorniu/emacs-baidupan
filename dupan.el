@@ -177,7 +177,7 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
 
 (defun dupan-info (fmt-string &rest args)
   (when dupan-debug
-    (apply 'message (concat "\t[百度网盘] " fmt-string) args)))
+    (apply #'message (concat "\t[百度网盘] " fmt-string) args)))
 
 (defun dupan-normalize (path &optional force-prefix-p)
   (when (and path (string-match-p (concat "^" dupan-prefix) path))
@@ -580,7 +580,8 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
   (dupan-info "[handler] file-exists-p: %s" filename)
   (setq filename (dupan-normalize filename))
   ;; 有些插件对这种 tramp 方式的文件访问支持不够好，为避免问题，暂时硬核打补丁
-  (cond ((string-match-p "~/" filename) nil)
+  (cond ((string= "/" filename) t)
+        ((string-match-p "~/" filename) nil)
         ((string-match-p "[/.]tags$" filename) nil) ; citre
         (t (dupan--find-with-cache filename nocache))))
 
@@ -726,10 +727,6 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
   "Async, so make `directory-files' return nil, and loading here."
   (dupan-info "[handler] insert-directory: %s" filename)
   (setq filename (expand-file-name filename))
-
-  ;; 默认 `project-current' 会尝试搜索所有 vcs 文件夹来确定项目目录
-  ;; 这会导致亿吨的请求，引发卡顿和调用频繁错误。所以干脆禁掉
-  (setq-local project-find-functions nil)
 
   (if (not full-directory-p)
       (let* ((attrs (file-attributes filename))
@@ -955,6 +952,14 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
     (funcall fn)))
 
 (advice-add #'dired-sort-toggle :around #'dupan-dired-sort-toggle-advice)
+
+(defun dupan-project--find-in-directory-advice (fn dir)
+  "避免通过搜索 vcs 文件的方式获取 current-project，提高效率"
+  (if (dupan-file-p dir)
+      (cons 'transient dupan-prefix)
+    (funcall fn dir)))
+
+(advice-add #'project--find-in-directory :around #'dupan-project--find-in-directory-advice)
 
 
 
