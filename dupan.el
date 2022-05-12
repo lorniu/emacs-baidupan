@@ -32,6 +32,11 @@
 (require 'url-http)
 (require 'dired-aux)
 
+(eval-when-compile
+  (defvar url-http-end-of-headers)
+  (defvar url-http-content-type)
+  (defvar url-http-response-status))
+
 (defgroup dupan nil
   "百度网盘客户端。"
   :prefix "dupan-"
