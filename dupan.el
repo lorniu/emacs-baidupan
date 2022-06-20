@@ -258,6 +258,12 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
 
 ;;; Authorization
 
+(defun dupan-dump-to-file (list file)
+  "Pretty print LIST to FILE."
+  (with-temp-file file
+    (insert ";;-*- mode: emacs-lisp -*-\n")
+    (pp list (current-buffer))))
+
 ;;;###autoload
 (defun dupan-add-account ()
   "用来生成包含身份验证信息的配置文件。"
@@ -300,8 +306,7 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
                                (alist-get 'baidu_name (dupan-req 'uinfo)))))
                   (setf (alist-get 'name account) name)
                   (setq dupan--config (append dupan--config (list account)))
-                  (with-temp-file dupan-config-file
-                    (pp dupan--config (current-buffer)))
+                  (dupan-dump-to-file dupan--config dupan-config-file)
                   (if newp
                       (message "配置文件 %s 生成成功!" dupan-config-file)
                     (message "帐号 %s 添加成功。可以使用 'dupan-switch-account' 切换帐号。" name)))))))))))
@@ -320,8 +325,7 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
                            if (string-equal name (alist-get 'name acc)) collect acc into first
                            else collect acc into others
                            finally return (append first others))))
-      (with-temp-file dupan-config-file
-        (pp newcf (current-buffer)))
+      (dupan-dump-to-file newcf dupan-config-file)
       (dupan-load-config))))
 
 (defun dupan-load-config ()
@@ -351,21 +355,26 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
          (expired (alist-get 'expires-in config))
          (token (alist-get 'access-token config))
          (avail (and token expired (time-less-p (current-time) expired))))
-    (if avail token
+    (cond
+     (avail token)
+     ((and token expired (not avail))
       (message "[百度网盘] 刷新 token...")
-      (cl-labels ((save (result)
-                    (let* ((tk (alist-get 'access_token result))
-                           (etime (time-add (current-time) (seconds-to-time (- (alist-get 'expires_in result) 120)))))
-                      (setf (alist-get 'access-token dupan--config) tk)
-                      (setf (alist-get 'expires-in dupan--config) etime)
-                      (with-temp-file dupan-config-file
-                        (prin1 dupan--config (current-buffer))))))
-        (let ((url (dupan-make-url 'token
-                     :grant_type "refresh_token"
-                     :refresh_token (alist-get 'refresh-token config)
-                     :client_id     (alist-get 'id config)
-                     :client_secret (alist-get 'secret config))))
-          (save (dupan-make-request url)))))))
+      (let* ((url (dupan-make-url 'token
+                    :grant_type "refresh_token"
+                    :refresh_token (alist-get 'refresh-token config)
+                    :client_id     (alist-get 'id config)
+                    :client_secret (alist-get 'secret config)))
+             (result (dupan-make-request url)))
+        (if result
+            (let* ((rk (alist-get 'refresh_token result))
+                   (tk (alist-get 'access_token result))
+                   (etime (time-add (current-time) (seconds-to-time (- (alist-get 'expires_in result) 120)))))
+              (setf (alist-get 'refresh-token (car dupan--config)) rk)
+              (setf (alist-get 'access-token (car dupan--config)) tk)
+              (setf (alist-get 'expires-in (car dupan--config)) etime)
+              (dupan-dump-to-file dupan--config dupan-config-file))
+          (user-error "在请求 refresh_token 的时候有错误发生?"))))
+     (t (user-error "配置文件有误")))))
 
 
 ;;; API
