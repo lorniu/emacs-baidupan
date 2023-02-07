@@ -1010,6 +1010,43 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
     (message "已在浏览器中打开 '%s'，请前往查看。" path)
     (browse-url (concat url (url-hexify-string path)))))
 
+(defvar dupan-aria2-rpc-url "http://localhost:6800/jsonrpc")
+(defvar dupan-aria2-rpc-token nil)
+
+(defun dupan-download-with-aria2 ()
+  (interactive)
+  (let ((file (dired-file-name-at-point)))
+    (if (and file (file-regular-p file))
+        (let* ((finfo (dupan-req 'finfo (dupan-normalize (expand-file-name file)) t))
+               (out (let ((p (string-trim (read-string "下载当前文件并命名为: "
+                                                       (file-name-nondirectory (alist-get 'path finfo))))))
+                      (if (> (length p) 1) p (error "需要提供一个有效名字"))))
+               (url-request-method "POST")
+               (url-request-extra-headers '(("Content-Type" . "application/json")))
+               (url-request-data (encode-coding-string
+                                  (json-serialize
+                                   `((jsonrpc . 2.0)
+                                     (id . "randm")
+                                     (method . "aria2.addUri")
+                                     (params . ,(vconcat
+                                                 (delq nil
+                                                       (list
+                                                        (if dupan-aria2-rpc-token (format "token:%s" dupan-aria2-rpc-token))
+                                                        (vconcat (list (dupan-make-url (alist-get 'dlink finfo))))
+                                                        (list :out out)))))))
+                                  'utf-8))
+               url-history-track json-response)
+          (dupan-info "rpc-cmdline data: %s" url-request-data)
+          (with-current-buffer (url-retrieve-synchronously dupan-aria2-rpc-url t)
+            (goto-char (point-max))
+            (beginning-of-line)
+            (setq json-response (json-parse-buffer :object-type 'alist))
+            (kill-buffer))
+          (if (alist-get 'result json-response)
+              (message "已经将下载任务添加到了 aria2 中")
+            (error "添加到 aria2 失败: %s" (alist-get 'message (alist-get 'error json-response)))))
+      (user-error "请确保光标下面是一个百度云盘文件"))))
+
 (add-to-list 'file-name-handler-alist
              `(,(concat "\\`" dupan-prefix) . dupan-handler))
 
