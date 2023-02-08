@@ -1014,6 +1014,7 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
 (defvar dupan-aria2-rpc-token nil)
 
 (defun dupan-download-with-aria2 ()
+  "将当前网盘文件通过 rpc 发送给 aria2 进行下载"
   (interactive)
   (let ((file (dired-file-name-at-point)))
     (if (and file (file-regular-p file))
@@ -1026,7 +1027,7 @@ maybe request body not standard 的错误。莫名其妙，干脆自己拼得了
                (url-request-data (encode-coding-string
                                   (json-serialize
                                    `((jsonrpc . 2.0)
-                                     (id . "randm")
+                                     (id . ,(format "dupan:%d" (time-to-seconds)))
                                      (method . "aria2.addUri")
                                      (params . ,(vconcat
                                                  (delq nil
