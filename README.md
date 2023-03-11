@@ -28,6 +28,7 @@ U1S1，用于阅读文档、简单编辑、文件整理等，这个比官方的�
   - 可以使用 `C` 完成复制、上传、下载，当前支持文件夹的增量式上传下载
   - 使用 `s` 对文件列表进行排序
   - 使用 `y` 显示 `dlink`，再次按 `y` 会将复制下载命令。可以使用 `dupan-make-download-cmdline-function` 定制下载命令行
+  - 如果你已经启动了 aria2c rpc 服务，那么可以通过 `M-x dupan-download-with-aria2` 对当前文件进行下载
 
 ## 相关链接
 
